@@ -1,6 +1,9 @@
 import models.cifar10 as cifar10_extra_models
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn as nn
 from examples import *
 import copy
@@ -12,6 +15,8 @@ def main():
     parser = get_base_parser()
     args = parser.parse_args()
     hp = get_hyperparam(args)
+    # Copy log_name from hyperparameters to args - stupid bug
+    args.log_name = hp.log_name
     if hp.gpu_id == eppb.GPU.ANY:
         args.gpu = get_freer_gpu()
     elif hp.gpu_id == eppb.GPU.NONE:

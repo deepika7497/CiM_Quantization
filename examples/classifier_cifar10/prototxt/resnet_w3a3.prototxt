@@ -11,9 +11,15 @@ workers: 8
 print_freq: 40
 evaluate: false
 pretrained: true
-seed: 0
-gpu_id: ANY
 
+gpu_id: ANY
+multi_gpu {
+    world_size: 1
+    rank: 0
+    dist_url: "tcp://localhost:29500"
+    dist_backend: "nccl"
+    multiprocessing_distributed: true
+}
 
 nbits_w: 3
 nbits_a: 3
@@ -24,10 +30,8 @@ xbar: 128
 adcbits: 1.5
 stochastic_quant: False
 
-resume : '/home/min/a/saxenau/NANO/CiM_Quantization/logger/resnet20_ternaryadc_w3a3/resnet20_Conv2dLSQCiMbest.pth.tar'
 
 lr_scheduler: CosineAnnealingLR
-
 
 optimizer: SGD
 sgd {
