@@ -216,7 +216,9 @@ class _Conv2dQCiM(nn.Conv2d):
         
         
         if self.adcbits == 1.5 :
-            self.alpha_cim = Parameter(torch.ones(1,self.num_xbars, self.num_bit_slice_weight, self.num_bit_slice_act, 1, self.out_channels), requires_grad=True)
+            # self.alpha_cim = Parameter(torch.ones(1,self.num_xbars, self.num_bit_slice_weight, self.num_bit_slice_act, 1, self.out_channels), requires_grad=True)
+            # self.alpha_cim = Parameter(torch.ones(1,self.num_xbars, self.num_bit_slice_weight, self.num_bit_slice_act, 1, 1), requires_grad=True)
+            self.alpha_cim = Parameter(torch.ones(1), requires_grad=True)
         elif self.adcbits == 1:
             self.alpha_cim = Parameter(torch.ones(1,self.num_xbars, self.num_bit_slice_weight, self.num_bit_slice_act, 1, self.out_channels), requires_grad=True)
         else : 
@@ -235,6 +237,7 @@ class _Conv2dQCiM(nn.Conv2d):
         self.register_buffer('init_state', torch.zeros(1))
         self.register_buffer('signed_act', torch.zeros(1))
         self.register_buffer('init_state_cim', torch.zeros(1))
+        self.register_buffer('is_first', torch.zeros(1))
 
     def add_param(self, param_k, param_v):
         self.kwargs_q[param_k] = param_v

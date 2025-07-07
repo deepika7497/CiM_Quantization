@@ -1,10 +1,9 @@
-import models.cifar10 as cifar10_extra_models
+import models.mnist as mnist_extra_models
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.nn as nn
 from examples import *
-import copy
-import os
+
 best_acc1 = 0
 
 
@@ -43,7 +42,7 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         print("=> creating model '{}'".format(args.hp.arch))
     if args.hp.model_source == eppb.HyperParam.ModelSource.Local:
-        model = cifar10_extra_models.__dict__[args.hp.arch](pretrained=args.hp.pretrained)
+        model = mnist_extra_models.__dict__[args.hp.arch](pretrained=args.hp.pretrained)
     else:
         raise NotImplementedError
 
@@ -55,6 +54,7 @@ def main_worker(gpu, ngpus_per_node, args):
         
     }, nbits_w=args.hp.nbits_w, nbits_a=args.hp.nbits_a,nbits_alpha=args.hp.nbits_alpha, wbitslice=args.hp.wbitslice, abitslice=args.hp.abitslice, xbar=args.hp.xbar, adcbits=args.hp.adcbits, signed_xbar=args.hp.signed_xbar,stochastic_quant=args.hp.stochastic_quant)
     
+
     # parallel and multi-gpu
     model = distributed_model(model, ngpus_per_node, args)
 
@@ -64,15 +64,13 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     df = DataloaderFactory(args)
-    train_loader, val_loader, train_sampler = df.product_train_val_loader(df.cifar10)
+    train_loader, val_loader = df.product_train_val_loader(df.mnist)
     writer = get_summary_writer(args, ngpus_per_node, model)
-    
     if args.hp.evaluate:
         if writer is not None:
             get_model_info(model, args, val_loader)
     args.batch_num = len(train_loader)
-    
-    
+
     ## copy scripts to log_dir for bookeeping
     log_dir = './' + args.log_name +'/scripts'
     os.system("mkdir "+log_dir)
@@ -82,25 +80,20 @@ def main_worker(gpu, ngpus_per_node, args):
     os.system("cp -r ./proto "+log_dir)
     os.system("cp -r ./test "+log_dir)
     os.system("cp -r ./examples "+log_dir)
-    
-    
+
+    # define loss function (criterion)
     scheduler_lr = get_lr_scheduler(optimizer, args)
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    optimizer = get_optimizer(model, args)
+
     if args.hp.evaluate:
         validate(val_loader, model, criterion, args)
         return
-    
-    # define loss function (criterion)
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-    optimizer = get_optimizer(model, args)
-    scheduler_lr = get_lr_scheduler(optimizer, args)
-    # acc1, acc5 = validate(val_loader, model, criterion, args)
-    #args.start_epoch = 172
+
     for epoch in range(0, args.start_epoch):
         scheduler_lr.step()
         pass
     for epoch in range(args.start_epoch, args.hp.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args, writer)
         scheduler_lr.step()

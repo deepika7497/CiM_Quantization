@@ -127,3 +127,4 @@ results.json
 *.npy
 
 CIFAR-10/
+MNIST/

@@ -68,7 +68,8 @@ message HyperParam {
     optional int32 xbar = 55 [default=64];
     optional float adcbits = 56 [default=6];
     optional bool signed_xbar = 58 ;
-    optional bool stochastic_quant = 59 ;
+    optional bool stochastic_quant = 59 [default=false] ;
+    optional bool first_layer = 61 [default=false] ;
     
     optional CimMode cimmode = 57;
 

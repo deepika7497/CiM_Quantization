@@ -33,6 +33,7 @@ xbar: 64
 adcbits: 6.0
 signed_xbar: false
 stochastic_quant: false
+first_layer: false
 warmup {
   epochs: 10
   multiplier: 10.0

@@ -1,16 +1,17 @@
-main_file: "examples/classifier_cifar10/main_lsq.py"
-arch: "resnet20"
+main_file: "examples/classifier_mnist/main.py"
+arch: "mnist_lenet"
 model_source: Local
-log_name: "ternaryadc_4w4a_16xbar"
+
+log_name: "ternary"
 debug: false
-data: "./CIFAR-10"
-lr: 0.005
+data: "./MNIST"
+lr: 0.01
 epochs: 100
 batch_size: 256
-workers: 8
-print_freq: 40
+workers: 16
+print_freq: 50
 evaluate: false
-pretrained: true
+pretrained: false
 seed: 0
 gpu_id: ANY
 
@@ -20,13 +21,13 @@ nbits_a: 4
 nbits_alpha: 0
 wbitslice: 1
 abitslice: 1
-xbar: 16
+xbar: 8
 adcbits: 1.5
 stochastic_quant: false
 first_layer: true
-resume: '/home/min/a/saxenau/NANO/CiM_Quantization/logger/resnet20_fpadc_4w4a/resnet20_Conv2dLSQCiMbest.pth.tar'
 
 lr_scheduler: CosineAnnealingLR
+resume : "/home/min/a/saxenau/NANO/CiM_Quantization/logger/mnist_1xlenet_baseline/mnist_lenet_Conv2dLSQCiMbest.pth.tar"
 
 
 optimizer: SGD
@@ -34,5 +35,3 @@ sgd {
   weight_decay: 1e-4
   momentum: 0.9
 }
-
-

@@ -90,7 +90,7 @@ class get_cim_output_signed(Function):
     
     @staticmethod
     def forward(ctx, x, w, conv_stride, conv_padding, conv_dilation, act_bits, act_bit_slice, 
-                        weight_bits, weight_bit_slice, adc_bits, arr,  binary_mask, alpha_cim, weight_scaling_factor, act_scaling_factor, stochastic, signed_act):
+                        weight_bits, weight_bit_slice, adc_bits, arr,  binary_mask, alpha_cim, weight_scaling_factor, act_scaling_factor, stochastic, signed_act, is_first):
         'Mapping : '
         '1 : positive and negative weights separate '
         '2 : twos complement mapping of weights'
@@ -144,11 +144,11 @@ class get_cim_output_signed(Function):
         ctx.flatdim = flatdim
         ctx.arr = arr
         if signed_act:
-            x_unf_sliced = slicing_act_signed(x_unf, ctx.act_bits, act_bit_slice).transpose(0,1)
+            x_unf_sliced = slicing_act_signed(x_unf, ctx.act_bits, act_bit_slice).transpose(0,1).type(intermediate_dtype)
         else:
             x_unf_sliced = slicing_act(x_unf,act_bits, act_bit_slice).transpose(0,1).type(intermediate_dtype)
         'shape of x_unf_sliced = [batch_size, num_bit_slices_act, flattened_dim_out ,flat_dim]'
-        
+
         'making weight tensors'
         w_unf = w_int.view(w_int.shape[0],-1).t()
         if (mapping == 1):
@@ -174,7 +174,7 @@ class get_cim_output_signed(Function):
                 for k in range (num_bit_slice_weight):
                     temp_x = x_unf_sliced[:,j,:,i*arr:(i+1)*arr]
                     temp_w = w_unf_sliced[k,i*arr:(i+1)*arr,:]
-                    out_unf[:,i,k,j,:,:] = ((torch.matmul(temp_x,temp_w)))
+                    out_unf[:,i,k,j,:,:] = ((torch.matmul(temp_x,temp_w))) # Non ideal matmul with V_in and W_in
                     
         if (flatdim % arr) != 0 :
             for s in range(2):
@@ -204,10 +204,13 @@ class get_cim_output_signed(Function):
             #Near ADCLess
             if stochastic:
                 sigmoid_sharpness = 0.01
+                ctx.sigmoid_sharpness = sigmoid_sharpness
+                ctx.is_first = is_first
                 ### stochastic sigmoid quantization
-                num_iter = 50
-                sigmoid_1 = torch.sigmoid((out_unf - 0.5 * alpha_cim)/sigmoid_sharpness)
-                sigmoid_2 = torch.sigmoid((out_unf + 0.5 * alpha_cim)/sigmoid_sharpness)
+                num_iter = 1
+                sign_alpha = torch.sign(alpha_cim)
+                sigmoid_1 = torch.sigmoid((out_unf - 0.5 * alpha_cim.abs())/(weight_scaling_factor*act_scaling_factor*sigmoid_sharpness))
+                sigmoid_2 = torch.sigmoid((out_unf + 0.5 * alpha_cim.abs())/(weight_scaling_factor*act_scaling_factor*sigmoid_sharpness))
                 
                 stoch_sigmoid_1 = 0
                 stoch_sigmoid_2 = 0
@@ -216,9 +219,13 @@ class get_cim_output_signed(Function):
                     stoch_sigmoid_2 += torch.ceil(sigmoid_2 - torch.cuda.FloatTensor(out_unf.size()).uniform_())
                 
                 adc_out =  stoch_sigmoid_1/num_iter + stoch_sigmoid_2/num_iter - 1
-                adc_out = torch.round(adc_out).clamp(Qn_adc, Qp_adc)
-                adc_out = torch.mul(adc_out, alpha_cim)
-
+                # adc_out = sigmoid_1 + sigmoid_2 - 1 
+                adc_out = torch.round(adc_out)
+                adc_out = torch.mul(adc_out, alpha_cim) * sign_alpha
+                # if alpha_cim < 0:
+                #     adc_out = (out_unf)/alpha_cim
+                #     adc_out = torch.round(adc_out).clamp(Qn_adc, Qp_adc)
+                #     adc_out = torch.mul(adc_out, alpha_cim)
             else:
                 adc_out = (out_unf)/alpha_cim
                 adc_out = torch.round(adc_out).clamp(Qn_adc, Qp_adc)
@@ -259,9 +266,17 @@ class get_cim_output_signed(Function):
             ps = ps_int * weight_scaling_factor * act_scaling_factor
             ps = ps/alpha_cim
         elif adc_bits == 1.5:
-            ps_int = ctx.ps_int.type(torch.float32)
-            ps = ps_int * weight_scaling_factor * act_scaling_factor
-            ps = ps/alpha_cim
+            if ctx.stochastic:
+                ps_int = ctx.ps_int.type(torch.float32)
+                ps = ps_int * weight_scaling_factor * act_scaling_factor
+                sigmoid_1 = torch.sigmoid((ps - 0.5 * alpha_cim)/(weight_scaling_factor*act_scaling_factor*ctx.sigmoid_sharpness))
+                del_sigmoid_1 = sigmoid_1 * (1 - sigmoid_1)
+                sigmoid_2 = torch.sigmoid((ps + 0.5 * alpha_cim)/(weight_scaling_factor*act_scaling_factor*ctx.sigmoid_sharpness))
+                del_sigmoid_2 = sigmoid_2 * (1 - sigmoid_2)
+            else:
+                ps_int = ctx.ps_int.type(torch.float32)
+                ps = ps_int * weight_scaling_factor * act_scaling_factor
+                ps = ps/alpha_cim
         else:
             #adc bits = 0 or > 1.5 do not have scale factor
             ps = ctx.ps_int.type(torch.float32)
@@ -307,16 +322,14 @@ class get_cim_output_signed(Function):
         grad_output_after_adc = grad_temp.clone()
 
         'effect of ADC clamping'
-        greater = ps.ge(Qp_adc+1e-5)
-        lesser = ps.le(Qn_adc-1e-5)
-        
-        grad_temp[torch.logical_or(greater,lesser)] = 0
+        if ctx.stochastic:
+            grad_temp = torch.mul(grad_temp, alpha_cim)
+            grad_temp = grad_temp * (del_sigmoid_1 / (weight_scaling_factor*act_scaling_factor*ctx.sigmoid_sharpness)) + grad_temp * (del_sigmoid_2 / (weight_scaling_factor*act_scaling_factor*ctx.sigmoid_sharpness))
+        else:
+            greater = ps.ge(Qp_adc+1e-5)
+            lesser = ps.le(Qn_adc-1e-5)
+            grad_temp[torch.logical_or(greater,lesser)] = 0
 
-        # 'effect of division with alpha and multiplication with beta'
-        # if adc_bits == 1.5:
-        #     grad_temp = (alpha_cim * grad_temp)/beta_cim 
-        
-        
         'gradients for scale parameter alpha'
         if adc_bits == 1:
             grad_alpha = torch.sign(ps.clone())
@@ -324,12 +337,21 @@ class get_cim_output_signed(Function):
             grad_alpha = torch.mul(grad_alpha, grad_output_after_adc)
             grad_alpha = torch.sum(grad_alpha,dim = (0,4), keepdim= True)
         elif adc_bits == 1.5:
-            grad_alpha = torch.round(ps.clone())
-            grad_alpha[greater] = Qp_adc 
-            grad_alpha[lesser] = Qn_adc 
-            grad_alpha = torch.mul(grad_alpha,1.0/math.sqrt(ps.numel() * (Qp_adc)))
-            grad_alpha = torch.mul(grad_alpha, grad_output_after_adc)
-            grad_alpha = torch.sum(grad_alpha,dim = (0,4), keepdim= True)
+            if ctx.stochastic:
+                grad_alpha = grad_output_after_adc * alpha_cim
+                grad_alpha = -1 * (grad_alpha * (del_sigmoid_1 / (weight_scaling_factor*act_scaling_factor*ctx.sigmoid_sharpness)) + grad_alpha * (del_sigmoid_2 / (weight_scaling_factor*act_scaling_factor*ctx.sigmoid_sharpness)))
+                grad_alpha = torch.mul(grad_alpha,1.0/math.sqrt(ps.numel() * (Qp_adc)))
+                grad_alpha = torch.mul(grad_alpha, grad_output_after_adc)
+                grad_alpha = torch.sum(grad_alpha,dim = (0,4), keepdim= True)
+                
+            else:
+                grad_alpha = torch.round(ps.clone())
+                grad_alpha[greater] = Qp_adc 
+                grad_alpha[lesser] = Qn_adc 
+                grad_alpha = torch.mul(grad_alpha,1.0/math.sqrt(ps.numel() * (Qp_adc)))
+                grad_alpha = torch.mul(grad_alpha, grad_output_after_adc)
+                # grad_alpha = torch.sum(grad_alpha,dim = (0,4,5), keepdim= True)
+                grad_alpha = torch.sum(grad_alpha).unsqueeze(0)
         else :
             grad_alpha = None
         
@@ -383,7 +405,7 @@ class get_cim_output_signed(Function):
         
         
         
-        return grad_input, grad_weight, None, None,  None, None , None, None, None, None, None, None, grad_alpha, None, None, None, None
+        return grad_input, grad_weight, None, None,  None, None , None, None, None, None, None, None, grad_alpha, None, None, None, None, None
 
 
 class Conv2dLSQ(_Conv2dQ):
@@ -533,9 +555,12 @@ class Conv2dLSQCiM(_Conv2dQCiM):
             if x.min() < -1e-5:
                 self.signed_act.data.fill_(1)
         
-    
-        Qn_a = 0
-        Qp_a = 2 ** self.nbits_a - 1
+        if self.signed_act :
+            Qn_a = -2 ** (self.nbits_a - 1)
+            Qp_a = 2 ** (self.nbits_a - 1) - 1
+        else:
+            Qn_a = 0
+            Qp_a = 2 ** self.nbits_a - 1
         if self.training and self.init_state == 0:
             self.alpha_act.data.copy_(2 * x.abs().mean() / math.sqrt(Qp_a))
             self.alpha_weight.data.copy_(2 * self.weight.abs().mean() / math.sqrt(Qp_w))
@@ -557,30 +582,34 @@ class Conv2dLSQCiM(_Conv2dQCiM):
         if (self.training) and (self.init_state_cim == 0) and (self.alpha_cim is not None):
             with torch.no_grad():
                 cim_outputs = get_analog_partial_sums_signed(x_q, w_q, self.stride, self.padding, self.dilation, self.nbits_a, self.abitslice, self.nbits_w, self.wbitslice, self.xbar, weight_scaling_factor, act_scaling_factor)
-                temp = 2.0*(cim_outputs).abs().mean(dim = (0,4), keepdim = True)/ math.sqrt(Qp_adc)
+                # temp = 2.0*(cim_outputs).abs().mean(dim = (0,4,5), keepdim = True)/ math.sqrt(Qp_adc)
+                temp = 2.0*(cim_outputs).abs().mean()/ math.sqrt(Qp_adc)
                 temp[temp == 0] = 1.0 * weight_scaling_factor * act_scaling_factor
                 self.alpha_cim.data.copy_(temp)
                 self.init_state_cim.fill_(1)
         
         #Quantize Alpha
-        Qp_alpha = 2 ** self.nbits_alpha - 1
+        Qp_alpha = 2 ** self.nbits_alpha 
         Qn_alpha = 1
         if self.alpha_cim is not None:
             alpha = self.alpha_cim
-            alpha_scale = (alpha.max() - alpha.min())/(Qp_alpha - Qn_alpha)
-            alpha_q = round_pass(alpha / alpha_scale).clamp(Qn_alpha, Qp_alpha) * alpha_scale 
+            if self.nbits_alpha == 0:
+                alpha_q = alpha
+            else:
+                alpha_scale = (alpha.max() - alpha.min())/(Qp_alpha - Qn_alpha)
+                alpha_q = (round_pass(alpha / alpha_scale).clamp(Qn_alpha, Qp_alpha) )* alpha_scale
         else:
             alpha_q = None
         
         if self.adcbits != 0:
         
             #Get cim outputs
-            out = get_cim_output_signed.apply(x_q, w_q, self.stride, self.padding, self.dilation, self.nbits_a, self.abitslice, self.nbits_w, self.wbitslice, self.adcbits, self.xbar,  self.binary_mask, alpha_q,  weight_scaling_factor, act_scaling_factor, self.stochastic_quant, self.signed_act)
+            out = get_cim_output_signed.apply(x_q, w_q, self.stride, self.padding, self.dilation, self.nbits_a, self.abitslice, self.nbits_w, self.wbitslice, self.adcbits, self.xbar,  self.binary_mask, alpha_q,  weight_scaling_factor, act_scaling_factor, self.stochastic_quant, self.signed_act, self.is_first)
             #Reshape to get final layer outputs
             fold_x =int( (x_q.shape[-1] - self.weight.shape[-1] + 2*self.padding[0])/self.stride[0] + 1)
             out = out.transpose(1,2).view(x_q.shape[0],self.out_channels,fold_x,fold_x)
             if self.bias is not None:
-                out = out + self.bias
+                out = out + self.bias.view(1,-1,1,1)
         else:
             out = torch.nn.functional.conv2d(x_q,w_q, self.bias, self.stride, self.padding, self.dilation)
     
